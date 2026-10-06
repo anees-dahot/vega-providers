@@ -58,8 +58,22 @@ export async function request(
       userAgent: solved.userAgent || commonHeaders["User-Agent"],
     };
     await kvStore?.set(SESSION_KEY, session);
-    const res = await axios.get(url, { signal, headers: headers(session) });
-    return res.data;
+    try {
+      const res = await axios.get(url, { signal, headers: headers(session) });
+      return res.data;
+    } catch (retryError: any) {
+      // Surface why the retry was refused (Cloudflare vs the site itself).
+      const r = retryError?.response;
+      if (r) {
+        const body =
+          typeof r.data === "string" ? r.data : JSON.stringify(r.data || "");
+        const text = body.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+        throw new Error(
+          `After solving the challenge the retry still got HTTP ${r.status} | server=${r.headers?.server || "?"} | cf-mitigated=${r.headers?.["cf-mitigated"] || "no"} | cookie-sent=${/cf_clearance/.test(session.cookies)} | body="${text.slice(0, 160)}"`,
+        );
+      }
+      throw retryError;
+    }
   }
 }
 
