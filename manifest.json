@@ -14,5 +14,13 @@
     "icon": "",
     "type": "anime",
     "disabled": false
+  },
+  {
+    "display_name": "ToonStream",
+    "value": "toonstream",
+    "version": "1.0",
+    "icon": "",
+    "type": "anime",
+    "disabled": false
   }
 ]
