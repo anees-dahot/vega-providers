@@ -1,6 +1,6 @@
 import { EpisodeLink, ProviderContext } from "../types";
 import { throwProviderError } from "../providerErrors";
-import { request } from "./common";
+import { request, requestMany } from "./common";
 
 export const getEpisodes = async function ({
   url,
@@ -15,11 +15,15 @@ export const getEpisodes = async function ({
     const first = await request(providerContext, path(1), undefined, true);
     const lastPage: number = first?.last_page || 1;
 
-    const rest = await Promise.all(
-      Array.from({ length: Math.max(lastPage - 1, 0) }, (_, i) =>
-        request(providerContext, path(i + 2), undefined, true),
-      ),
-    );
+    // One WebView round trip for all remaining pages.
+    const rest =
+      lastPage > 1
+        ? await requestMany(
+            providerContext,
+            Array.from({ length: lastPage - 1 }, (_, i) => path(i + 2)),
+            true,
+          )
+        : [];
 
     const episodes: EpisodeLink[] = [];
     for (const pageData of [first, ...rest]) {
