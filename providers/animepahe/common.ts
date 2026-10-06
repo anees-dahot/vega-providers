@@ -104,8 +104,10 @@ function fetchScript(urls: string[], releasePath?: string): string {
   var told = false;
   var timer = setInterval(function(){
     if (!document.body) return;
-    if (document.title.indexOf('Just a moment') === 0 || document.querySelector('#challenge-form, .cf-turnstile, #cf-wrapper')) {
+    if (document.title.indexOf('Just a moment') === 0 || document.querySelector('#challenge-form, .cf-turnstile')) {
       // Ask the app to show the (hidden) WebView so the user can solve it.
+      // Block pages ("Attention Required") are not challenges: same-origin
+      // fetches from them still work, so those fall through to fetching.
       if (!told) { told = true; window.ReactNativeWebView.postMessage(JSON.stringify({__waf:true, challenge:true})); }
       return;
     }
@@ -139,7 +141,7 @@ async function viaWebView(
       title: "AnimePahe verification",
       description: "Complete the check below. This closes by itself.",
       silent: true,
-      headers: { ...commonHeaders, Referer: `${origin}/` },
+      headers: { ...commonHeaders, Referer: `${await getBase(providerContext)}/` },
       injectedJavaScript: fetchScript(urls, releasePath),
       timeoutMs: 90000,
     });
