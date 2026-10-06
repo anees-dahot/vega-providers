@@ -66,6 +66,8 @@ export interface Info {
 export interface EpisodeLink {
   title: string;
   link: string;
+  /** Filler episode (not part of the main story). */
+  filler?: boolean;
   description?: string;
   image?: string;
   quickDownload?: boolean;
@@ -85,6 +87,8 @@ export interface Link {
     image?: string;
     quickDownload?: boolean;
     skip?: SkipInterval[];
+    /** Filler episode (not part of the main story). */
+    filler?: boolean;
   }[];
 }
 

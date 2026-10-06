@@ -15,6 +15,8 @@ type Source = {
   audio: string;
   fansub: string;
   av1: boolean;
+  /** Badges shown on the site's source button, e.g. "BD". */
+  badges?: string[];
 };
 
 const M3U8 = /https?:\/\/[^'"\s]+\.m3u8[^'"\s]*/;
@@ -32,6 +34,11 @@ function parseSources(cheerio: ProviderContext["cheerio"], html: string): Source
       audio: $(el).attr("data-audio") || "jpn",
       fansub: $(el).attr("data-fansub") || "",
       av1: $(el).attr("data-av1") === "1",
+      badges: $(el)
+        .find("span")
+        .map((_, b) => $(b).text().trim())
+        .get()
+        .filter((t: string) => t && !/^(eng|jpn|sub|dub)$/i.test(t)),
     }))
     .get()
     .filter((s: Source) => s.embed);
@@ -158,11 +165,15 @@ export const getStream = async function ({
           await putCache(providerContext, `m3u8:${s.embed}`, M3U8_TTL, m3u8);
         }
         const dub = s.audio.toLowerCase() === "eng";
+        // The server name stays the same across shows (the app keys server
+        // rules by it and strips quality from it); the release group and
+        // badges go in tags.
         out.push({
-          server: `${s.fansub || "Kwik"} ${s.resolution}p (${dub ? "Dub" : "Sub"})${s.av1 ? " AV1" : ""}`,
+          server: `${dub ? "Dub" : "Sub"}${s.av1 ? " AV1" : ""}`,
           link: m3u8,
           type: "m3u8",
           quality: s.resolution,
+          tags: [s.fansub, ...(s.badges || [])].filter(Boolean),
           headers: { Referer: "https://kwik.cx/" },
         });
       }
@@ -182,8 +193,12 @@ export const getStream = async function ({
         : "";
       throw new Error(`No playable source resolved.${hint} ${failures.join("; ")}`);
     }
-    // Highest quality first, dub after sub of the same quality.
-    out.sort((a, b) => Number(b.quality) - Number(a.quality));
+    // Highest quality first; AV1 after the widely playable version.
+    out.sort(
+      (a, b) =>
+        Number(b.quality) - Number(a.quality) ||
+        Number(/AV1/.test(a.server)) - Number(/AV1/.test(b.server)),
+    );
     return out;
   } catch (err) {
     throwProviderError("AnimePahe", "stream", err);

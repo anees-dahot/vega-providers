@@ -49,6 +49,7 @@ export const getMeta = async function ({
             // stream.ts expects "<animeSession>/<episodeSession>"
             link: `${link}/${ep.session}`,
             type: isMovie ? "movie" : "series",
+            ...(ep.filler ? { filler: true } : {}),
           });
         }
       }

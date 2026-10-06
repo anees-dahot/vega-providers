@@ -21,6 +21,7 @@ export const getEpisodes = async function ({
           episodes.push({
             title: `Episode ${ep.episode}`,
             link: `${url}/${ep.session}`,
+            ...(ep.filler ? { filler: true } : {}),
           });
         }
       }
