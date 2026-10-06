@@ -6,5 +6,13 @@
     "icon": "",
     "type": "anime",
     "disabled": false
+  },
+  {
+    "display_name": "AnimaHD",
+    "value": "animahd",
+    "version": "1.0",
+    "icon": "",
+    "type": "anime",
+    "disabled": false
   }
 ]
