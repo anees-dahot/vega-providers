@@ -21,6 +21,7 @@ const M3U8 = /https?:\/\/[^'"\s]+\.m3u8[^'"\s]*/;
 
 const PLAY_TTL = 7 * 24 * HOUR; // Kwik embed links on a play page don't change
 const PREFETCH = 12;
+const M3U8_TTL = 3 * HOUR;
 
 function parseSources(cheerio: ProviderContext["cheerio"], html: string): Source[] {
   const $ = cheerio.load(html);
@@ -97,10 +98,18 @@ export const getStream = async function ({
       const failures: string[] = [];
       const pages: Record<string, string> = {};
 
-      // Native requests first, retrying once; they work for most Kwik embeds.
+      // Reuse playlists resolved in the last few hours: Kwik blocks networks
+      // that request it too often.
+      const known: Record<string, string> = {};
+      for (const s of list) {
+        const hit = await peekCache<string>(providerContext, `m3u8:${s.embed}`, M3U8_TTL);
+        if (hit) known[s.embed] = hit;
+      }
+
+      // Native requests first, retrying once on network errors only.
       const blocked: Source[] = [];
       await Promise.all(
-        list.map(async (s) => {
+        list.filter((s) => !known[s.embed]).map(async (s) => {
           for (let attempt = 0; attempt < 2; attempt++) {
             try {
               const res = await axios.get(s.embed, {
@@ -115,7 +124,10 @@ export const getStream = async function ({
                 blocked.push(s);
                 return;
               }
-              if (attempt === 1) failures.push(`${s.resolution}p: ${status || e?.message}`);
+              if (status || attempt === 1) {
+              failures.push(`${s.resolution}p: ${status || e?.message}`);
+              return;
+            }
             }
           }
         }),
@@ -137,10 +149,13 @@ export const getStream = async function ({
       const out: Stream[] = [];
       for (const s of list) {
         const page = pages[s.embed];
-        const m3u8 = page ? extractM3u8(page) : undefined;
+        const m3u8 = known[s.embed] || (page ? extractM3u8(page) : undefined);
         if (!m3u8) {
           if (page) failures.push(`${s.resolution}p: no playlist in embed`);
           continue;
+        }
+        if (!known[s.embed]) {
+          await putCache(providerContext, `m3u8:${s.embed}`, M3U8_TTL, m3u8);
         }
         const dub = s.audio.toLowerCase() === "eng";
         out.push({
@@ -162,7 +177,10 @@ export const getStream = async function ({
       ({ out, failures } = await resolve(sources));
     }
     if (out.length === 0) {
-      throw new Error(`No playable source resolved. ${failures.join("; ")}`);
+      const hint = failures.some((f) => /403/.test(f))
+        ? " Kwik (the video host) is refusing this network; try mobile data or wait a while."
+        : "";
+      throw new Error(`No playable source resolved.${hint} ${failures.join("; ")}`);
     }
     // Highest quality first, dub after sub of the same quality.
     out.sort((a, b) => Number(b.quality) - Number(a.quality));
