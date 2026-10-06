@@ -1,17 +1,21 @@
 import { ProviderContext } from "../types";
 
 export const DEFAULT_BASE = "https://animepahe.pw";
-const COOKIE_KEY = "cfCookies";
+const SESSION_KEY = "cfSession";
+
+type CfSession = { cookies: string; userAgent: string };
 
 export async function getBase(
   providerContext: ProviderContext,
 ): Promise<string> {
-  const override = await providerContext.kvStore.get<string>("baseUrlOverride");
+  const override = await providerContext.kvStore?.get<string>("baseUrlOverride");
   return (override || DEFAULT_BASE).trim().replace(/\/+$/, "");
 }
 
-// GET with Cloudflare handling: reuse saved cf_clearance cookies, and on a
-// 403 challenge ask the user to solve it once in a WebView, then retry.
+// GET with Cloudflare handling: reuse the saved cf_clearance session, and on a
+// 403 challenge ask the user to solve it once in a WebView, then retry. The
+// clearance cookie is bound to the WebView's User-Agent, so both are stored
+// and sent together.
 export async function request(
   providerContext: ProviderContext,
   path: string,
@@ -21,19 +25,27 @@ export async function request(
   const { axios, openWebView, commonHeaders, kvStore } = providerContext;
   const base = await getBase(providerContext);
   const url = path.startsWith("http") ? path : `${base}${path}`;
-  const headers = (cookie?: string) => ({
+  const headers = (session?: CfSession) => ({
     ...commonHeaders,
     Referer: base,
     ...(json ? { Accept: "application/json, text/plain, */*" } : {}),
-    ...(cookie ? { Cookie: cookie } : {}),
+    ...(session
+      ? { Cookie: session.cookies, "User-Agent": session.userAgent }
+      : {}),
   });
 
-  const saved = await kvStore.get<string>(COOKIE_KEY);
+  const saved = await kvStore?.get<CfSession>(SESSION_KEY);
   try {
     const res = await axios.get(url, { signal, headers: headers(saved) });
     return res.data;
   } catch (error: any) {
     if (error.response?.status !== 403) throw error;
+    if (!openWebView) {
+      throw new Error(
+        "AnimePahe is behind a Cloudflare challenge (403) and this environment cannot open a WebView to solve it. Test inside the app.",
+      );
+    }
+    if (saved) await kvStore?.delete(SESSION_KEY);
     const solved = await openWebView(base, {
       title: "Solve the captcha below and click done",
       description: "Required to bypass AnimePahe anti-bot protection.",
@@ -41,11 +53,12 @@ export async function request(
       force: true,
       waitForCookie: "cf_clearance",
     });
-    await kvStore.set(COOKIE_KEY, solved.cookies);
-    const res = await axios.get(url, {
-      signal,
-      headers: headers(solved.cookies),
-    });
+    const session: CfSession = {
+      cookies: solved.cookies,
+      userAgent: solved.userAgent || commonHeaders["User-Agent"],
+    };
+    await kvStore?.set(SESSION_KEY, session);
+    const res = await axios.get(url, { signal, headers: headers(session) });
     return res.data;
   }
 }
