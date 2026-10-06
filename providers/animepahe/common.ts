@@ -9,6 +9,57 @@ export async function getBase(
   return (override || DEFAULT_BASE).trim().replace(/\/+$/, "");
 }
 
+// ---------------------------------------------------------------------------
+// Persistent cache (kvStore). Every WebView round trip shows a dialog, so
+// results are reused for a while instead of being fetched on each screen.
+// ---------------------------------------------------------------------------
+const INDEX_KEY = "cache:index";
+type CacheIndex = Record<string, number>;
+
+export const MINUTE = 60 * 1000;
+export const HOUR = 60 * MINUTE;
+
+export async function cached<T>(
+  providerContext: ProviderContext,
+  key: string,
+  ttlMs: number,
+  loader: () => Promise<T>,
+): Promise<T> {
+  const kv = providerContext.kvStore;
+  const storeKey = `cache:${key}`;
+  if (kv) {
+    try {
+      const hit = await kv.get<{ at: number; value: T }>(storeKey);
+      if (hit && Date.now() - hit.at < ttlMs) return hit.value;
+    } catch {
+      // ignore cache read failures
+    }
+  }
+  const value = await loader();
+  if (kv) {
+    try {
+      const now = Date.now();
+      await kv.set(storeKey, { at: now, value });
+      const index = (await kv.get<CacheIndex>(INDEX_KEY)) || {};
+      index[storeKey] = now + Math.max(ttlMs, 24 * HOUR);
+      for (const k of Object.keys(index)) {
+        if (index[k] < now) {
+          delete index[k];
+          await kv.delete(k);
+        }
+      }
+      await kv.set(INDEX_KEY, index);
+    } catch {
+      // ignore cache write failures
+    }
+  }
+  return value;
+}
+
+// ---------------------------------------------------------------------------
+// WebView transport
+// ---------------------------------------------------------------------------
+
 // openWebView resolves one pending request per host, so concurrent calls would
 // receive each other's results. Run WebView fetches strictly one at a time.
 let queue: Promise<unknown> = Promise.resolve();
@@ -18,21 +69,32 @@ function serial<T>(fn: () => Promise<T>): Promise<T> {
   return run;
 }
 
-// Runs inside the page once Cloudflare has let it through: fetch every path
+// Runs inside the page once Cloudflare has let it through: fetch every URL
 // same-origin (the WebView is the client Cloudflare already trusts) and post
-// the raw responses back to the app.
-function fetchScript(paths: string[]): string {
+// the raw responses back to the app. When `releasePath` is set, the first
+// response is a paged release list; the remaining pages are fetched too.
+function fetchScript(urls: string[], releasePath?: string): string {
   return `(function(){
   if (window.__apRun) return; window.__apRun = true;
-  var paths = ${JSON.stringify(paths)};
+  var urls = ${JSON.stringify(urls)};
+  var releasePath = ${JSON.stringify(releasePath || "")};
+  function get(u){
+    return fetch(u, {credentials:'include'})
+      .then(function(r){ return r.text().then(function(t){ return {status:r.status, text:t}; }); })
+      .catch(function(e){ return {status:0, text:String(e)}; });
+  }
   var timer = setInterval(function(){
     if (!document.body || document.title.indexOf('Just a moment') === 0) return;
     clearInterval(timer);
-    Promise.all(paths.map(function(u){
-      return fetch(u, {credentials:'include'})
-        .then(function(r){ return r.text().then(function(t){ return {status:r.status, text:t}; }); })
-        .catch(function(e){ return {status:0, text:String(e)}; });
-    })).then(function(res){
+    Promise.all(urls.map(get)).then(function(res){
+      if (!releasePath) return res;
+      var first;
+      try { first = JSON.parse(res[res.length - 1].text); } catch(e) { return res; }
+      var last = first && first.last_page ? first.last_page : 1;
+      var more = [];
+      for (var p = 2; p <= last; p++) more.push(get(releasePath + p));
+      return Promise.all(more).then(function(rest){ return res.concat(rest); });
+    }).then(function(res){
       window.ReactNativeWebView.postMessage(JSON.stringify({__waf:true, data:JSON.stringify(res)}));
     });
   }, 300);
@@ -43,17 +105,18 @@ type Raw = { status: number; text: string };
 
 async function viaWebView(
   providerContext: ProviderContext,
-  base: string,
-  paths: string[],
+  origin: string,
+  urls: string[],
+  releasePath?: string,
 ): Promise<Raw[]> {
   const { openWebView, commonHeaders } = providerContext;
   return serial(async () => {
-    const result = await openWebView(`${base}${paths[0]}`, {
+    const result = await openWebView(urls[0], {
       title: "Loading AnimePahe",
       description:
         "If a verification appears, complete it. This closes by itself.",
-      headers: { ...commonHeaders, Referer: base },
-      injectedJavaScript: fetchScript(paths),
+      headers: { ...commonHeaders, Referer: `${origin}/` },
+      injectedJavaScript: fetchScript(urls, releasePath),
       timeoutMs: 90000,
     });
     try {
@@ -63,48 +126,61 @@ async function viaWebView(
       // fall through
     }
     throw new Error(
-      "AnimePahe verification was closed before the page finished loading. Try again and wait for it to close by itself.",
+      "The verification was closed before the page finished loading. Try again and wait for it to close by itself.",
     );
   });
 }
 
-// Fetches several AnimePahe paths. In the app this goes through the WebView,
-// because Cloudflare rejects the app's native HTTP client even with a valid
-// cf_clearance cookie. Without a WebView (test runner) it uses axios.
+const originOf = (u: string) => u.match(/^https?:\/\/[^/]+/i)?.[0] || "";
+
+function snippet(text: string): string {
+  return text.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim().slice(0, 120);
+}
+
+async function rawMany(
+  providerContext: ProviderContext,
+  urls: string[],
+  releasePath?: string,
+): Promise<Raw[]> {
+  const { axios, openWebView, commonHeaders } = providerContext;
+  if (typeof openWebView === "function") {
+    return viaWebView(providerContext, originOf(urls[0]), urls, releasePath);
+  }
+  // No WebView (test runner): plain requests, no paging helper.
+  return Promise.all(
+    urls.map(async (u) => {
+      const res = await axios.get(u, {
+        headers: { ...commonHeaders, Referer: `${originOf(u)}/` },
+        validateStatus: () => true,
+        responseType: "text",
+        transformResponse: (d: any) => d,
+      });
+      return { status: res.status, text: String(res.data) };
+    }),
+  );
+}
+
+function check(raws: Raw[], urls: string[], json: boolean): any[] {
+  return raws.map((r, i) => {
+    if (r.status < 200 || r.status >= 300) {
+      throw new Error(
+        `${urls[i] || "page"} returned HTTP ${r.status}: ${snippet(r.text)}`,
+      );
+    }
+    return json ? JSON.parse(r.text) : r.text;
+  });
+}
+
+// Fetches AnimePahe paths in one WebView round trip. Cloudflare rejects the
+// app's native HTTP client even with a valid cf_clearance cookie.
 export async function requestMany(
   providerContext: ProviderContext,
   paths: string[],
   json = false,
 ): Promise<any[]> {
-  const { axios, openWebView, commonHeaders } = providerContext;
   const base = await getBase(providerContext);
-
-  let raws: Raw[];
-  if (typeof openWebView === "function") {
-    raws = await viaWebView(providerContext, base, paths);
-  } else {
-    raws = await Promise.all(
-      paths.map(async (p) => {
-        const res = await axios.get(`${base}${p}`, {
-          headers: { ...commonHeaders, Referer: base },
-          validateStatus: () => true,
-          responseType: "text",
-          transformResponse: (d: any) => d,
-        });
-        return { status: res.status, text: String(res.data) };
-      }),
-    );
-  }
-
-  return raws.map((r, i) => {
-    if (r.status < 200 || r.status >= 300) {
-      const snippet = r.text.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
-      throw new Error(
-        `AnimePahe ${paths[i]} returned HTTP ${r.status}: ${snippet.slice(0, 120)}`,
-      );
-    }
-    return json ? JSON.parse(r.text) : r.text;
-  });
+  const urls = paths.map((p) => (p.startsWith("http") ? p : `${base}${p}`));
+  return check(await rawMany(providerContext, urls), urls, json);
 }
 
 export async function request(
@@ -114,6 +190,105 @@ export async function request(
   json = false,
 ): Promise<any> {
   return (await requestMany(providerContext, [path], json))[0];
+}
+
+// Show page plus its whole episode list in a single WebView round trip.
+export async function requestShow(
+  providerContext: ProviderContext,
+  session: string,
+): Promise<{ html: string; pages: any[] }> {
+  const base = await getBase(providerContext);
+  const releasePath = `/api?m=release&id=${session}&sort=episode_asc&page=`;
+  const urls = [`${base}/anime/${session}`, `${base}${releasePath}1`];
+  if (typeof providerContext.openWebView !== "function") {
+    const [html, first] = check(await rawMany(providerContext, urls), urls, false);
+    return { html, pages: [JSON.parse(first)] };
+  }
+  // The script pages through the release list (`page=2…`) after the first fetch.
+  const raws = await rawMany(providerContext, urls, `${base}${releasePath}`);
+  const checked = check(raws, urls.concat(raws.slice(2).map(() => "release page")), false);
+  return {
+    html: checked[0],
+    pages: checked.slice(1).map((t: string) => JSON.parse(t)),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Posters. AnimePahe's image host sits behind the same Cloudflare challenge,
+// which the app's image loader can't pass, so covers come from AniList.
+// ---------------------------------------------------------------------------
+const ANILIST = "https://graphql.anilist.co";
+
+async function anilist(providerContext: ProviderContext, query: string) {
+  const res = await providerContext.axios.post(
+    ANILIST,
+    { query },
+    { headers: { "Content-Type": "application/json", Accept: "application/json" } },
+  );
+  return res.data?.data || {};
+}
+
+const coverOf = (m: any): string =>
+  m?.coverImage?.extraLarge || m?.coverImage?.large || "";
+
+// Cover URLs for several titles with one request; cached for a week per title.
+export async function coversByTitle(
+  providerContext: ProviderContext,
+  titles: string[],
+): Promise<Record<string, string>> {
+  const out: Record<string, string> = {};
+  const missing: string[] = [];
+  for (const t of titles) {
+    const hit = await providerContext.kvStore?.get<{ at: number; url: string }>(
+      `cover:${t.toLowerCase()}`,
+    );
+    if (hit && Date.now() - hit.at < 7 * 24 * HOUR && hit.url) out[t] = hit.url;
+    else if (!(t in out)) missing.push(t);
+  }
+  if (missing.length) {
+    try {
+      const body = missing
+        .map(
+          (t, i) =>
+            `a${i}: Media(search: ${JSON.stringify(t)}, type: ANIME) { coverImage { extraLarge large } }`,
+        )
+        .join(" ");
+      const data = await anilist(providerContext, `query { ${body} }`);
+      for (let i = 0; i < missing.length; i++) {
+        const url = coverOf(data[`a${i}`]);
+        if (url) {
+          out[missing[i]] = url;
+          await providerContext.kvStore?.set(
+            `cover:${missing[i].toLowerCase()}`,
+            { at: Date.now(), url },
+          );
+        }
+      }
+    } catch {
+      // posters are optional
+    }
+  }
+  return out;
+}
+
+// Poster and banner for one show, by AniList id when AnimePahe links it.
+export async function coverForShow(
+  providerContext: ProviderContext,
+  anilistId: string | undefined,
+  title: string,
+): Promise<string> {
+  try {
+    const arg = anilistId
+      ? `id: ${Number(anilistId)}`
+      : `search: ${JSON.stringify(title)}`;
+    const data = await anilist(
+      providerContext,
+      `query { Media(${arg}, type: ANIME) { coverImage { extraLarge large } } }`,
+    );
+    return coverOf(data.Media);
+  } catch {
+    return "";
+  }
 }
 
 // Decodes every Dean Edwards p.a.c.k.e.r. payload in a page (Kwik embeds

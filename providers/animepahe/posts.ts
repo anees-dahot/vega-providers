@@ -1,6 +1,17 @@
 import { Post, ProviderContext } from "../types";
 import { throwProviderError } from "../providerErrors";
-import { request } from "./common";
+import { MINUTE, cached, coversByTitle, request } from "./common";
+
+async function withCovers(
+  providerContext: ProviderContext,
+  posts: Post[],
+): Promise<Post[]> {
+  const covers = await coversByTitle(
+    providerContext,
+    posts.map((p) => p.title),
+  );
+  return posts.map((p) => ({ ...p, image: covers[p.title] || p.image }));
+}
 
 export const getPosts = async function ({
   page,
@@ -15,26 +26,34 @@ export const getPosts = async function ({
 }): Promise<Post[]> {
   try {
     // Latest-episode feed: newest releases first, one JSON call per page.
-    const data = await request(
+    // Cached briefly so switching screens doesn't reopen the WebView.
+    return await cached(
       providerContext,
-      `/api?m=airing&page=${page || 1}`,
-      signal,
-      true,
+      `airing:${page || 1}`,
+      2 * MINUTE,
+      async () => {
+        const data = await request(
+          providerContext,
+          `/api?m=airing&page=${page || 1}`,
+          signal,
+          true,
+        );
+        const seen = new Set<string>();
+        const posts: Post[] = [];
+        for (const item of data?.data || []) {
+          const link = item.anime_session;
+          if (!link || seen.has(link)) continue;
+          seen.add(link);
+          posts.push({
+            title: item.anime_title,
+            link,
+            image: "",
+            cornerTag: item.episode != null ? `EP ${item.episode}` : undefined,
+          });
+        }
+        return withCovers(providerContext, posts);
+      },
     );
-    const seen = new Set<string>();
-    const posts: Post[] = [];
-    for (const item of data?.data || []) {
-      const link = item.anime_session;
-      if (!link || seen.has(link)) continue;
-      seen.add(link);
-      posts.push({
-        title: item.anime_title,
-        link,
-        image: item.snapshot || "",
-        cornerTag: item.episode != null ? `EP ${item.episode}` : undefined,
-      });
-    }
-    return posts;
   } catch (err) {
     throwProviderError("AnimePahe", "posts", err);
   }
@@ -53,20 +72,28 @@ export const getSearchPosts = async function ({
   providerContext: ProviderContext;
 }): Promise<Post[]> {
   try {
-    const data = await request(
+    return await cached(
       providerContext,
-      `/api?m=search&q=${encodeURIComponent(searchQuery)}&page=${page || 1}`,
-      signal,
-      true,
+      `search:${searchQuery.toLowerCase()}:${page || 1}`,
+      10 * MINUTE,
+      async () => {
+        const data = await request(
+          providerContext,
+          `/api?m=search&q=${encodeURIComponent(searchQuery)}&page=${page || 1}`,
+          signal,
+          true,
+        );
+        const posts: Post[] = (data?.data || [])
+          .filter((a: any) => a.session && a.title)
+          .map((a: any) => ({
+            title: a.title,
+            link: a.session,
+            image: "",
+            cornerTag: a.type || undefined,
+          }));
+        return withCovers(providerContext, posts);
+      },
     );
-    return (data?.data || [])
-      .filter((a: any) => a.session && a.title)
-      .map((a: any) => ({
-        title: a.title,
-        link: a.session,
-        image: a.poster || "",
-        cornerTag: a.type || undefined,
-      }));
   } catch (err) {
     throwProviderError("AnimePahe", "search posts", err);
   }
