@@ -6,13 +6,5 @@
     "icon": "",
     "type": "anime",
     "disabled": false
-  },
-  {
-    "display_name": "ToonWorld",
-    "value": "toonworld",
-    "version": "1.2",
-    "icon": "",
-    "type": "anime",
-    "disabled": false
   }
 ]
