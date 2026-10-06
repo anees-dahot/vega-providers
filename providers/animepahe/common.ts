@@ -92,8 +92,11 @@ function serial<T>(fn: () => Promise<T>): Promise<T> {
 // the raw responses back to the app. When `releasePath` is set, the first
 // response is a paged release list; the remaining pages are fetched too.
 function fetchScript(urls: string[], releasePath?: string): string {
+  // No polling timers: Android throttles a hidden WebView's timers in the
+  // background. The app injects this on every page load, so after a
+  // Cloudflare check reloads the page it simply runs again.
   return `(function(){
-  if (window.__apRun) return; window.__apRun = true;
+  if (window.__apRun) return;
   var urls = ${JSON.stringify(urls)};
   var releasePath = ${JSON.stringify(releasePath || "")};
   function get(u){
@@ -101,17 +104,16 @@ function fetchScript(urls: string[], releasePath?: string): string {
       .then(function(r){ return r.text().then(function(t){ return {status:r.status, text:t}; }); })
       .catch(function(e){ return {status:0, text:String(e)}; });
   }
-  var told = false;
-  var timer = setInterval(function(){
-    if (!document.body) return;
+  function post(m){ window.ReactNativeWebView.postMessage(JSON.stringify(m)); }
+  function run(){
+    if (window.__apRun || !document.body) return;
     if (document.title.indexOf('Just a moment') === 0 || document.querySelector('#challenge-form, .cf-turnstile')) {
-      // Ask the app to show the (hidden) WebView so the user can solve it.
-      // Block pages ("Attention Required") are not challenges: same-origin
-      // fetches from them still work, so those fall through to fetching.
-      if (!told) { told = true; window.ReactNativeWebView.postMessage(JSON.stringify({__waf:true, challenge:true})); }
+      // A real challenge: ask the app to show the WebView. Block pages
+      // ("Attention Required") are not challenges; fetching from them works.
+      if (!window.__apTold) { window.__apTold = true; post({__waf:true, challenge:true}); }
       return;
     }
-    clearInterval(timer);
+    window.__apRun = true;
     Promise.all(urls.map(get)).then(function(res){
       if (!releasePath) return res;
       var first;
@@ -120,10 +122,9 @@ function fetchScript(urls: string[], releasePath?: string): string {
       var more = [];
       for (var p = 2; p <= last; p++) more.push(get(releasePath + p));
       return Promise.all(more).then(function(rest){ return res.concat(rest); });
-    }).then(function(res){
-      window.ReactNativeWebView.postMessage(JSON.stringify({__waf:true, data:JSON.stringify(res)}));
-    });
-  }, 300);
+    }).then(function(res){ post({__waf:true, data:JSON.stringify(res)}); });
+  }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', run); else run();
 })(); true;`;
 }
 

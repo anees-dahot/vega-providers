@@ -127,14 +127,12 @@ export const getStream = async function ({
               return;
             } catch (e: any) {
               const status = e?.response?.status;
-              if (status === 403) {
+              if (status || attempt === 1) {
+                // Refused or still failing: try it through the WebView below.
                 blocked.push(s);
+                failures.push(`${s.resolution}p: ${status || e?.message}`);
                 return;
               }
-              if (status || attempt === 1) {
-              failures.push(`${s.resolution}p: ${status || e?.message}`);
-              return;
-            }
             }
           }
         }),
@@ -148,6 +146,7 @@ export const getStream = async function ({
             blocked.map((s) => s.embed),
           );
           blocked.forEach((s, i) => (pages[s.embed] = texts[i]));
+          failures.length = 0;
         } catch (e: any) {
           failures.push(`kwik via WebView: ${e?.message}`);
         }
@@ -165,15 +164,20 @@ export const getStream = async function ({
           await putCache(providerContext, `m3u8:${s.embed}`, M3U8_TTL, m3u8);
         }
         const dub = s.audio.toLowerCase() === "eng";
-        // The server name stays the same across shows (the app keys server
-        // rules by it and strips quality from it); the release group and
-        // badges go in tags.
+        // Named like the site's source menu ("AOmundson BD Eng"); quality is
+        // its own field, since the app strips it from server names.
         out.push({
-          server: `${dub ? "Dub" : "Sub"}${s.av1 ? " AV1" : ""}`,
+          server: [
+            s.fansub || "Kwik",
+            ...(s.badges || []),
+            dub ? "Eng" : "",
+            s.av1 ? "AV1" : "",
+          ]
+            .filter(Boolean)
+            .join(" "),
           link: m3u8,
           type: "m3u8",
           quality: s.resolution,
-          tags: [s.fansub, ...(s.badges || [])].filter(Boolean),
           headers: { Referer: "https://kwik.cx/" },
         });
       }
@@ -193,9 +197,10 @@ export const getStream = async function ({
         : "";
       throw new Error(`No playable source resolved.${hint} ${failures.join("; ")}`);
     }
-    // Highest quality first; AV1 after the widely playable version.
+    // Same order as the site: subbed then dubbed, best quality first.
     out.sort(
       (a, b) =>
+        Number(/ Eng\b/.test(a.server)) - Number(/ Eng\b/.test(b.server)) ||
         Number(b.quality) - Number(a.quality) ||
         Number(/AV1/.test(a.server)) - Number(/AV1/.test(b.server)),
     );
