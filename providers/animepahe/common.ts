@@ -19,40 +19,58 @@ type CacheIndex = Record<string, number>;
 export const MINUTE = 60 * 1000;
 export const HOUR = 60 * MINUTE;
 
+export async function peekCache<T>(
+  providerContext: ProviderContext,
+  key: string,
+  ttlMs = Infinity,
+): Promise<T | undefined> {
+  try {
+    const hit = await providerContext.kvStore?.get<{ at: number; value: T }>(
+      `cache:${key}`,
+    );
+    if (hit && Date.now() - hit.at < ttlMs) return hit.value;
+  } catch {
+    // ignore cache read failures
+  }
+  return undefined;
+}
+
+export async function putCache(
+  providerContext: ProviderContext,
+  key: string,
+  ttlMs: number,
+  value: unknown,
+): Promise<void> {
+  const kv = providerContext.kvStore;
+  if (!kv) return;
+  try {
+    const storeKey = `cache:${key}`;
+    const now = Date.now();
+    await kv.set(storeKey, { at: now, value });
+    const index = (await kv.get<CacheIndex>(INDEX_KEY)) || {};
+    index[storeKey] = now + Math.max(ttlMs, 24 * HOUR);
+    for (const k of Object.keys(index)) {
+      if (index[k] < now) {
+        delete index[k];
+        await kv.delete(k);
+      }
+    }
+    await kv.set(INDEX_KEY, index);
+  } catch {
+    // ignore cache write failures
+  }
+}
+
 export async function cached<T>(
   providerContext: ProviderContext,
   key: string,
   ttlMs: number,
   loader: () => Promise<T>,
 ): Promise<T> {
-  const kv = providerContext.kvStore;
-  const storeKey = `cache:${key}`;
-  if (kv) {
-    try {
-      const hit = await kv.get<{ at: number; value: T }>(storeKey);
-      if (hit && Date.now() - hit.at < ttlMs) return hit.value;
-    } catch {
-      // ignore cache read failures
-    }
-  }
+  const hit = await peekCache<T>(providerContext, key, ttlMs);
+  if (hit !== undefined) return hit;
   const value = await loader();
-  if (kv) {
-    try {
-      const now = Date.now();
-      await kv.set(storeKey, { at: now, value });
-      const index = (await kv.get<CacheIndex>(INDEX_KEY)) || {};
-      index[storeKey] = now + Math.max(ttlMs, 24 * HOUR);
-      for (const k of Object.keys(index)) {
-        if (index[k] < now) {
-          delete index[k];
-          await kv.delete(k);
-        }
-      }
-      await kv.set(INDEX_KEY, index);
-    } catch {
-      // ignore cache write failures
-    }
-  }
+  await putCache(providerContext, key, ttlMs, value);
   return value;
 }
 
@@ -83,8 +101,14 @@ function fetchScript(urls: string[], releasePath?: string): string {
       .then(function(r){ return r.text().then(function(t){ return {status:r.status, text:t}; }); })
       .catch(function(e){ return {status:0, text:String(e)}; });
   }
+  var told = false;
   var timer = setInterval(function(){
-    if (!document.body || document.title.indexOf('Just a moment') === 0) return;
+    if (!document.body) return;
+    if (document.title.indexOf('Just a moment') === 0 || document.querySelector('#challenge-form, .cf-turnstile, #cf-wrapper')) {
+      // Ask the app to show the (hidden) WebView so the user can solve it.
+      if (!told) { told = true; window.ReactNativeWebView.postMessage(JSON.stringify({__waf:true, challenge:true})); }
+      return;
+    }
     clearInterval(timer);
     Promise.all(urls.map(get)).then(function(res){
       if (!releasePath) return res;
@@ -112,9 +136,9 @@ async function viaWebView(
   const { openWebView, commonHeaders } = providerContext;
   return serial(async () => {
     const result = await openWebView(urls[0], {
-      title: "Loading AnimePahe",
-      description:
-        "If a verification appears, complete it. This closes by itself.",
+      title: "AnimePahe verification",
+      description: "Complete the check below. This closes by itself.",
+      silent: true,
       headers: { ...commonHeaders, Referer: `${origin}/` },
       injectedJavaScript: fetchScript(urls, releasePath),
       timeoutMs: 90000,
@@ -190,6 +214,21 @@ export async function request(
   json = false,
 ): Promise<any> {
   return (await requestMany(providerContext, [path], json))[0];
+}
+
+// A paged JSON API (`last_page`) fetched completely in one WebView round trip.
+export async function requestPaged(
+  providerContext: ProviderContext,
+  pagePrefix: string,
+): Promise<any[]> {
+  const base = await getBase(providerContext);
+  const prefix = `${base}${pagePrefix}`;
+  const urls = [`${prefix}1`];
+  if (typeof providerContext.openWebView !== "function") {
+    return check(await rawMany(providerContext, urls), urls, true);
+  }
+  const raws = await rawMany(providerContext, urls, prefix);
+  return check(raws, raws.map((_, i) => `${prefix}${i + 1}`), true);
 }
 
 // Show page plus its whole episode list in a single WebView round trip.

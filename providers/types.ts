@@ -181,6 +181,11 @@ export interface OpenWebViewOptions {
   // Custom JavaScript injected into the WebView. Can communicate back via:
   // window.ReactNativeWebView.postMessage(JSON.stringify({ __waf: true, data: ... }))
   injectedJavaScript?: string;
+
+  // Load the page in a hidden WebView; the dialog only shows if the page
+  // posts { __waf: true, challenge: true } or nothing arrives for a while.
+  // Ignored by app builds that predate it (they show the dialog as before).
+  silent?: boolean;
 }
 
 // Result returned to the provider after the user solves the challenge.

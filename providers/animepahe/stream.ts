@@ -1,6 +1,13 @@
-import { Stream, ProviderContext } from "../types";
+import { Info, Stream, ProviderContext } from "../types";
 import { throwProviderError } from "../providerErrors";
-import { MINUTE, cached, getBase, request, requestMany, unpack } from "./common";
+import {
+  HOUR,
+  getBase,
+  peekCache,
+  putCache,
+  requestMany,
+  unpack,
+} from "./common";
 
 type Source = {
   embed: string;
@@ -11,6 +18,56 @@ type Source = {
 };
 
 const M3U8 = /https?:\/\/[^'"\s]+\.m3u8[^'"\s]*/;
+
+const PLAY_TTL = 7 * 24 * HOUR; // Kwik embed links on a play page don't change
+const PREFETCH = 12;
+
+function parseSources(cheerio: ProviderContext["cheerio"], html: string): Source[] {
+  const $ = cheerio.load(html);
+  return $("#resolutionMenu button, button[data-src]")
+    .map((_, el) => ({
+      embed: $(el).attr("data-src") || "",
+      resolution: $(el).attr("data-resolution") || "",
+      audio: $(el).attr("data-audio") || "jpn",
+      fansub: $(el).attr("data-fansub") || "",
+      av1: $(el).attr("data-av1") === "1",
+    }))
+    .get()
+    .filter((s: Source) => s.embed);
+}
+
+// Source lists for this episode and the next few, in one WebView round trip,
+// so watching or bulk-downloading a series doesn't need one per episode.
+async function loadSources(
+  providerContext: ProviderContext,
+  link: string,
+  fresh: boolean,
+): Promise<Source[]> {
+  if (!fresh) {
+    const hit = await peekCache<Source[]>(providerContext, `play:${link}`, PLAY_TTL);
+    if (hit && hit.length) return hit;
+  }
+  const anime = link.split("/")[0];
+  const meta = await peekCache<Info>(providerContext, `meta:${anime}`);
+  const all = (meta?.linkList || []).flatMap((l) =>
+    (l.directLinks || []).map((d) => d.link),
+  );
+  const batch = [link];
+  for (let i = all.indexOf(link) + 1; i > 0 && i < all.length && batch.length < PREFETCH; i++) {
+    if (!(await peekCache(providerContext, `play:${all[i]}`, PLAY_TTL))) batch.push(all[i]);
+  }
+  const texts = await requestMany(
+    providerContext,
+    batch.map((l) => `/play/${l}`),
+  );
+  let mine: Source[] = [];
+  for (let i = 0; i < batch.length; i++) {
+    const sources = parseSources(providerContext.cheerio, texts[i]);
+    if (sources.length) await putCache(providerContext, `play:${batch[i]}`, PLAY_TTL, sources);
+    if (i === 0) mine = sources;
+  }
+  return mine;
+}
 
 function extractM3u8(page: string): string | undefined {
   return unpack(page).match(M3U8)?.[0] || page.match(M3U8)?.[0];
@@ -28,92 +85,82 @@ export const getStream = async function ({
   isDownload?: boolean;
 }): Promise<Stream[]> {
   try {
-    const { cheerio, axios, commonHeaders } = providerContext;
+    const { axios, commonHeaders } = providerContext;
     const base = await getBase(providerContext);
 
-    // The play page needs the WebView; keep the source list for a while so
-    // streaming and downloading the same episode don't each open it.
-    const sources = await cached<Source[]>(
-      providerContext,
-      `play:${link}`,
-      10 * MINUTE,
-      async () => {
-        const html = await request(providerContext, `/play/${link}`, signal);
-        const $ = cheerio.load(html);
-        return $("#resolutionMenu button, button[data-src]")
-          .map((_, el) => ({
-            embed: $(el).attr("data-src") || "",
-            resolution: $(el).attr("data-resolution") || "",
-            audio: $(el).attr("data-audio") || "jpn",
-            fansub: $(el).attr("data-fansub") || "",
-            av1: $(el).attr("data-av1") === "1",
-          }))
-          .get()
-          .filter((s: Source) => s.embed);
-      },
-    );
+    let sources = await loadSources(providerContext, link, false);
     if (sources.length === 0) {
       throw new Error("The episode page listed no sources");
     }
 
-    const failures: string[] = [];
-    const pages: Record<string, string> = {};
+    const resolve = async (list: Source[]) => {
+      const failures: string[] = [];
+      const pages: Record<string, string> = {};
 
-    // Native requests first, retrying once; they work for most Kwik embeds.
-    const blocked: Source[] = [];
-    await Promise.all(
-      sources.map(async (s) => {
-        for (let attempt = 0; attempt < 2; attempt++) {
-          try {
-            const res = await axios.get(s.embed, {
-              signal,
-              headers: { ...commonHeaders, Referer: `${base}/` },
-            });
-            pages[s.embed] = String(res.data);
-            return;
-          } catch (e: any) {
-            const status = e?.response?.status;
-            if (status === 403) {
-              blocked.push(s);
+      // Native requests first, retrying once; they work for most Kwik embeds.
+      const blocked: Source[] = [];
+      await Promise.all(
+        list.map(async (s) => {
+          for (let attempt = 0; attempt < 2; attempt++) {
+            try {
+              const res = await axios.get(s.embed, {
+                signal,
+                headers: { ...commonHeaders, Referer: `${base}/` },
+              });
+              pages[s.embed] = String(res.data);
               return;
+            } catch (e: any) {
+              const status = e?.response?.status;
+              if (status === 403) {
+                blocked.push(s);
+                return;
+              }
+              if (attempt === 1) failures.push(`${s.resolution}p: ${status || e?.message}`);
             }
-            if (attempt === 1) failures.push(`${s.resolution}p: ${status || e?.message}`);
           }
+        }),
+      );
+
+      // Anything Cloudflare blocked is fetched through the WebView instead.
+      if (blocked.length > 0 && typeof providerContext.openWebView === "function") {
+        try {
+          const texts = await requestMany(
+            providerContext,
+            blocked.map((s) => s.embed),
+          );
+          blocked.forEach((s, i) => (pages[s.embed] = texts[i]));
+        } catch (e: any) {
+          failures.push(`kwik via WebView: ${e?.message}`);
         }
-      }),
-    );
-
-    // Anything Cloudflare blocked is fetched through the WebView instead.
-    if (blocked.length > 0 && typeof providerContext.openWebView === "function") {
-      try {
-        const texts = await requestMany(
-          providerContext,
-          blocked.map((s) => s.embed),
-        );
-        blocked.forEach((s, i) => (pages[s.embed] = texts[i]));
-      } catch (e: any) {
-        failures.push(`kwik via WebView: ${e?.message}`);
       }
-    }
 
-    const out: Stream[] = [];
-    for (const s of sources) {
-      const page = pages[s.embed];
-      const m3u8 = page ? extractM3u8(page) : undefined;
-      if (!m3u8) {
-        if (page) failures.push(`${s.resolution}p: no playlist in embed`);
-        continue;
+      const out: Stream[] = [];
+      for (const s of list) {
+        const page = pages[s.embed];
+        const m3u8 = page ? extractM3u8(page) : undefined;
+        if (!m3u8) {
+          if (page) failures.push(`${s.resolution}p: no playlist in embed`);
+          continue;
+        }
+        const dub = s.audio.toLowerCase() === "eng";
+        out.push({
+          server: `${s.fansub || "Kwik"} ${s.resolution}p (${dub ? "Dub" : "Sub"})${s.av1 ? " AV1" : ""}`,
+          link: m3u8,
+          type: "m3u8",
+          quality: s.resolution,
+          headers: { Referer: "https://kwik.cx/" },
+        });
       }
-      const dub = s.audio.toLowerCase() === "eng";
-      out.push({
-        server: `${s.fansub || "Kwik"} ${s.resolution}p (${dub ? "Dub" : "Sub"})${s.av1 ? " AV1" : ""}`,
-        link: m3u8,
-        type: "m3u8",
-        quality: s.resolution,
-        headers: { Referer: "https://kwik.cx/" },
-      });
-    }
 
+      return { out, failures };
+    };
+
+    let { out, failures } = await resolve(sources);
+    if (out.length === 0) {
+      // Cached links may have gone stale: reload the episode page once.
+      sources = await loadSources(providerContext, link, true);
+      ({ out, failures } = await resolve(sources));
+    }
     if (out.length === 0) {
       throw new Error(`No playable source resolved. ${failures.join("; ")}`);
     }

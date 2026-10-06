@@ -1,6 +1,6 @@
 import { Post, ProviderContext } from "../types";
 import { throwProviderError } from "../providerErrors";
-import { MINUTE, cached, coversByTitle, request } from "./common";
+import { MINUTE, cached, coversByTitle, request, requestPaged } from "./common";
 
 async function withCovers(
   providerContext: ProviderContext,
@@ -62,7 +62,6 @@ export const getPosts = async function ({
 export const getSearchPosts = async function ({
   searchQuery,
   page,
-  signal,
   providerContext,
 }: {
   searchQuery: string;
@@ -72,25 +71,32 @@ export const getSearchPosts = async function ({
   providerContext: ProviderContext;
 }): Promise<Post[]> {
   try {
+    // AnimePahe's search ignores the page number, so later pages would repeat
+    // page 1 forever. Return every result on page 1 and nothing after.
+    if ((page || 1) > 1) return [];
     return await cached(
       providerContext,
-      `search:${searchQuery.toLowerCase()}:${page || 1}`,
-      10 * MINUTE,
+      `search:${searchQuery.toLowerCase()}`,
+      30 * MINUTE,
       async () => {
-        const data = await request(
+        const pages = await requestPaged(
           providerContext,
-          `/api?m=search&q=${encodeURIComponent(searchQuery)}&page=${page || 1}`,
-          signal,
-          true,
+          `/api?m=search&q=${encodeURIComponent(searchQuery)}&page=`,
         );
-        const posts: Post[] = (data?.data || [])
-          .filter((a: any) => a.session && a.title)
-          .map((a: any) => ({
-            title: a.title,
-            link: a.session,
-            image: "",
-            cornerTag: a.type || undefined,
-          }));
+        const seen = new Set<string>();
+        const posts: Post[] = [];
+        for (const pageData of pages) {
+          for (const a of pageData?.data || []) {
+            if (!a.session || !a.title || seen.has(a.session)) continue;
+            seen.add(a.session);
+            posts.push({
+              title: a.title,
+              link: a.session,
+              image: "",
+              cornerTag: a.type || undefined,
+            });
+          }
+        }
         return withCovers(providerContext, posts);
       },
     );
