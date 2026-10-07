@@ -2,56 +2,40 @@
   {
     "display_name": "AnimePahe",
     "value": "animepahe",
-    "version": "2.1",
-    "icon": "",
+    "version": "2.2",
+    "icon": "https://raw.githubusercontent.com/anees-dahot/vega-providers/main/assets/animepahe.png",
     "type": "anime",
     "disabled": false
   },
   {
     "display_name": "AnimaHD",
     "value": "animahd",
-    "version": "1.0",
-    "icon": "",
-    "type": "anime",
-    "disabled": false
-  },
-  {
-    "display_name": "ToonStream",
-    "value": "toonstream",
     "version": "1.1",
-    "icon": "",
-    "type": "anime",
-    "disabled": false
-  },
-  {
-    "display_name": "AniKoto",
-    "value": "anikoto",
-    "version": "2.1",
-    "icon": "",
+    "icon": "https://raw.githubusercontent.com/anees-dahot/vega-providers/main/assets/animahd.png",
     "type": "anime",
     "disabled": false
   },
   {
     "display_name": "KickAssAnime",
     "value": "kickAssAnime",
-    "version": "1.1",
-    "icon": "",
-    "type": "anime",
-    "disabled": false
-  },
-  {
-    "display_name": "AniWatch",
-    "value": "aniwatch",
-    "version": "1.0",
-    "icon": "",
+    "version": "1.2",
+    "icon": "https://raw.githubusercontent.com/anees-dahot/vega-providers/main/assets/kickAssAnime.png",
     "type": "anime",
     "disabled": false
   },
   {
     "display_name": "Gogoanime",
     "value": "gogoanime",
+    "version": "1.1",
+    "icon": "https://raw.githubusercontent.com/anees-dahot/vega-providers/main/assets/gogoanime.png",
+    "type": "anime",
+    "disabled": false
+  },
+  {
+    "display_name": "Miruro",
+    "value": "miruro",
     "version": "1.0",
-    "icon": "",
+    "icon": "https://raw.githubusercontent.com/anees-dahot/vega-providers/main/assets/miruro.png",
     "type": "anime",
     "disabled": false
   }
