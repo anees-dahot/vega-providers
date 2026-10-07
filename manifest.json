@@ -22,5 +22,21 @@
     "icon": "",
     "type": "anime",
     "disabled": false
+  },
+  {
+    "display_name": "AniKoto",
+    "value": "anikoto",
+    "version": "2.1",
+    "icon": "",
+    "type": "anime",
+    "disabled": false
+  },
+  {
+    "display_name": "KickAssAnime",
+    "value": "kickAssAnime",
+    "version": "1.1",
+    "icon": "",
+    "type": "anime",
+    "disabled": false
   }
 ]
