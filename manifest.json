@@ -1,5 +1,13 @@
 [
   {
+    "display_name": "Flixbaba",
+    "value": "flixbaba",
+    "version": "1.0",
+    "icon": "https://raw.githubusercontent.com/anees-dahot/vega-providers/main/assets/flixbaba.png",
+    "type": "global",
+    "disabled": false
+  },
+  {
     "display_name": "AnimePahe",
     "value": "animepahe",
     "version": "2.2",
